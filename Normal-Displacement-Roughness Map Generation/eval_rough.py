@@ -1,0 +1,175 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jun  9 15:36:10 2021
+
+@author: Eric
+"""
+
+from model import Unet
+from utils import gray2rgb
+
+import torch
+import torch.nn as nn
+from torchvision import transforms
+from torch.utils.data import DataLoader
+from torch.utils.data import Dataset
+from torchvision.utils import save_image
+
+import os
+import glob
+import numpy as np
+from tqdm import tqdm
+from time import sleep
+from PIL import Image
+import matplotlib.pyplot as plt
+
+from skimage.metrics import structural_similarity
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+#%%
+PATH_CHK = "./rough/roughness_net_epoch_100.pth"
+DIR_EVAL = "./textures/"
+
+CROP = 512
+
+#%%
+transform = transforms.Compose([
+    transforms.Resize(CROP),
+    transforms.CenterCrop(CROP),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)) # (input - mean) / std
+    # outputs range from -1 to 1
+])
+
+gray_transform = transforms.Compose([
+    transforms.Resize(CROP),
+    transforms.CenterCrop(CROP),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=(0.5), std=(0.5)) # (input - mean) / std
+    # outputs range from -1 to 1
+])
+
+class TestDataset(Dataset):
+    def __init__(self, img_dir):
+        self.file_list = glob.glob(img_dir+"/*.jpg")
+        self.names = [os.path.splitext(os.path.basename(fp))[0] for fp in self.file_list]
+
+    def __len__(self):
+        return len(self.names)
+
+    def __getitem__(self, i):
+        img = Image.open(self.file_list[i]).convert('RGB')
+        img = transform(img)
+
+        return img, self.names[i]
+
+#%% test
+def test(net, in_folder, out_folder):
+    output_normal = os.path.join(out_folder, "output")
+    if not os.path.exists(output_normal):
+        os.makedirs(output_normal)
+
+    data_test = TestDataset(in_folder)
+    # print(batch_size)
+    testloader = DataLoader(data_test, batch_size=1, shuffle=False)
+
+    print("\nOutput test files...")
+
+    net.eval()
+    with torch.no_grad():
+        for idx, data in enumerate(testloader):
+            img_in = data[0].to(device)
+            img_out = net(img_in)
+
+            img_ones = torch.ones_like(img_out)
+            img_out = torch.sub(img_ones, img_out)
+
+            img_out = gray2rgb(img_out).to(device)
+            # print(img_name)
+
+            img_out_filename = os.path.join(output_normal, f"{data[1][0]}_roughness.png")
+            save_image(img_out, img_out_filename, value_range=(-1,1), normalize=True)
+            
+            
+
+    print("Done!")
+
+def testSSIM(net, in_folder, test_folder):
+
+
+    data_in = TestDataset(in_folder)
+    # print(batch_size)
+    inloader = DataLoader(data_in, batch_size=1, shuffle=False)
+
+
+    data_test = TestDataset(test_folder)
+    # print(batch_size)
+    testloader = DataLoader(data_test, batch_size=1, shuffle=False)
+    
+    # print("\nOutput test files...")
+
+    net.eval()
+    scores_list = []
+
+    criterion = nn.MSELoss().to(device)
+
+    with torch.no_grad():
+        for data, compare in zip(inloader, testloader): 
+            img_in = data[0].to(device)
+            img_out = net(img_in)
+            # print(img_out[0].shape)
+            img_out_arr = img_out[0].mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+            
+            # print(img_out_arr.shape)
+            
+            compare_arr = compare[0][0].mul(255).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+
+            # print(compare_arr.shape)
+            # print("----------")
+            # im = Image.fromarray(compare_arr[:,:,0])
+            # im.show()
+
+            # im2 = Image.fromarray(img_out_arr[:,:,0])
+            # im2.show()
+            # print(img_out[0][0,:,:].shape)
+            # print(compare[0][0][0,:,:].shape)
+            # (score, diff) = structural_similarity(img_out_arr[:,:,0], compare_arr[:,:,0], full=True, multichannel = True)
+
+            loss = criterion(img_out[0][0,:,:], compare[0][0][0,:,:])
+            print(loss)
+            scores_list.append(loss.item())
+
+            
+
+            # score_r = calculate_fid(img_out_arr[:,:,0], compare_arr[:,:,0])
+            # score_g = calculate_fid(img_out_arr[:,:,1], compare_arr[:,:,1])
+            # score_b = calculate_fid(img_out_arr[:,:,2], compare_arr[:,:,2])
+            # score = (score_r+score_g+score_b)/3
+            # print(score)
+            
+            # scores_list.append(score)
+            
+            
+    
+    scores_list_arr = np.array(scores_list)        
+    np.savetxt('scores.txt', scores_list_arr, delimiter=',')
+    print("Done!")
+
+#%%
+def main():
+    input_folder = os.path.join(DIR_EVAL, "input")
+
+    disp_net = Unet(out_channels=1).to(device)
+    checkpoint = torch.load(PATH_CHK)
+    disp_net.load_state_dict(checkpoint["model"])
+
+    test(disp_net, input_folder, DIR_EVAL)
+	
+	# Testing SSIM between autogenerated map and a ground truth one
+    # input_folder = os.path.join(DIR_EVAL, "color")
+    # test_folder = os.path.join(DIR_EVAL, "roughness")
+    # testSSIM(disp_net, input_folder, test_folder)
+
+if __name__ == "__main__":
+    main()
